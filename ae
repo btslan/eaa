@@ -1,0 +1,1080 @@
+import json
+import time
+import uuid
+import base64
+import shutil
+import hashlib
+import isodate
+import requests
+
+from common import *
+from tqdm import tqdm
+from iso639 import languages
+from Crypto.Cipher import AES
+from colorama import Fore as clr
+from colorama import init as clr_init
+from progress.bar import IncrementalBar
+from pywidevine.decrypt.wvdecrypt import WvDecrypt
+
+#========== ACC ==========#
+
+mode = "SUNNXT"
+
+email, password, token = GetEmailPass(mode)
+
+#=========================#
+
+#======== HELPER =========#
+
+clr_init(autoreset=True)
+
+def scan_url(url):
+    url_parts = url.split('/')
+    if '-tv/' in url or '/tv/detail/' in url:
+        return 'show'
+    if 'live' in url_parts:
+        return 'LiveTV'
+
+def argManager():
+    parser = ArgsManager(mode)
+    args = parser.parse_args()
+    return args
+
+args = argManager()
+
+#========================#
+
+#======== CLIENT ========#
+
+if args.uhd: args.VideoCodec = 'h265'
+
+'''
+# WEB API
+SHOW_INFO_URL = "https://www.sunnxt.com/tv/getPreviousEpisode/"
+PLAYBACK_URL = 'https://www.sunnxt.com/movie/getMediaLinkForCounter'
+login_api = 'https://www.sunnxt.com/login'
+
+playback_headers = {
+    "X-Forwarded-For":"157.32.0.0",
+    "accept": "application/json, text/plain, */*",
+    "x-requested-with": "XMLHttpRequest",
+    "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/84.0.4147.125 Safari/537.36",
+    "content-type": "application/json;charset\u003dUTF-8",
+}
+
+def login(email, password):
+
+    login_headers = {
+        "X-Forwarded-For":"157.32.0.0",
+        "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/84.0.4147.125 Safari/537.36",
+    }
+    
+    URL = "https://www.sunnxt.com/"
+    resp = requests.get(URL, headers=login_headers)
+    token = re.findall(r'<meta name="csrf-token" content="(.*?)"',resp.text)[0]
+    cookies = dict(resp.cookies)
+    
+    login_headers['x-csrf-token'] = token
+    login_headers['x-requested-with'] = 'XMLHttpRequest'
+
+    login_data = {
+        "email": email,
+        "password": password
+    }
+    
+    resp = requests.post(login_api, headers=login_headers, data=login_data, cookies=cookies)
+    
+    if 'error' in resp.json().keys():
+        print(f'\n{resp.json().get("error")}')
+        exit()
+    
+    cookies = dict(resp.cookies)
+    cookies['x-csrf-token'] = token
+    
+    with open(sunnxt_token, 'w') as f:
+        json.dump(cookies, f)
+
+def ParseCookieFile(sunnxt_token):
+    with open(sunnxt_token, 'r') as fp:
+        cookies = json.loads(fp.read())
+    return cookies
+
+if os.path.exists(sunnxt_token):
+    cookies = ParseCookieFile(sunnxt_token)
+else:
+    login(email, password)
+    cookies = ParseCookieFile(sunnxt_token)
+
+playback_headers['x-csrf-token'] = cookies['x-csrf-token']
+'''
+
+api_headers = {
+    'contentlanguage': 'telugu',
+    'x-myplex-platform': 'android',
+    'user-agent': 'Dalvik/2.1.0 (Linux; U; Android 11; Redmi 5 Plus Build/RQ1A.210105.003)',
+    'user-agent': 'AppleCoreMedia/1.0.0.15L211 (Apple TV; U; CPU OS 11_3 like Mac OS X; fr_fr)',
+    'appversion': '766',
+    # 'x-forwarded-for': '157.32.0.0'
+}
+
+def login(email, password):
+    global api_headers
+    d_ = {
+        "profile": "work",
+        "clientSecret": "apalyaAndroid",
+        "serialNo": str(uuid.uuid4()),
+        "make": "Hisilicon",
+        "resolution": "1080x1920",
+        "model": "SMART_TV",
+        "osVersion": "8.0",
+        "os": "AndroidSony"
+    }
+    resp_ = requests.post('https://api.sunnxt.com/user/v2/registerDevice', headers=api_headers, data=d_).json()
+    if 'errors' in resp_: jdent(resp_)
+    api_headers['clientKey'] = resp_['clientKey']
+    data = {
+        'userid': email,
+        'password': password,
+        'profile': 'work'
+    }
+    resp = requests.post('https://api.sunnxt.com/user/v2/signIn', headers=api_headers, data=data).json()
+    if resp.get('status') != 'SUCCESS': jdent(resp)
+    if 'errors' in resp or resp['code'] == 400: jdent(resp)
+    with open(sunnxt_token, 'w') as f: json.dump(resp_, f, indent=4)
+    
+if not os.path.exists(sunnxt_token): login(email, password)
+else: api_headers['clientKey'] = json.loads(open(sunnxt_token).read())['clientKey']
+
+class SunnxtClient():
+    
+    def __init__(self,url,dl_type):
+        self.url = url
+        self.dl_type = dl_type
+    
+    def GetShowID(self):
+        self.show_id = re.findall(r'\d+', self.url)[0]
+    
+    '''
+    def GetEpsiodeIDS_WEB(self):
+        self.GetShowID()
+        data = {
+            "params": {
+                "startIndex": 1,
+                "count": 1000,
+                "id": self.show_id,
+                "type": "tv"
+            }
+        }
+        SHOW_INFO = requests.post(SHOW_INFO_URL, headers=playback_headers, json=data, cookies=cookies).json()
+        EIDS = []
+        for x in SHOW_INFO:
+            EIDS.append(x['_id'])
+
+        try: EIDS.remove(self.show_id)
+        except Exception: pass
+        
+        EIDS.reverse()
+        return EIDS
+    '''
+    
+    def GetEpsiodeIDS(self):
+        self.GetShowID()
+        EIDS = []
+        
+        url = f'https://api.sunnxt.com/content/v3/vods/GID_{self.show_id}'
+        
+        fields = [
+            "contents",
+            # "images",
+            "generalInfo",
+            # "publishingHouse",
+            # "subtitles"
+        ]
+        
+        params = {
+            "fields": ','.join(fields),
+            "startIndex": "1",
+            "count": "2",
+            "operator": "myplex",
+            "orderBy": "releaseDate",
+            "orderMode": "-1"
+        }
+        
+        resp = requests.get(url, headers=api_headers, params=params).json()
+        # jdent(resp)
+        if resp["status"] != 'SUCCESS': jdent(resp)
+        for x in resp['results']:
+            if x['_id'] not in EIDS: EIDS.append(x['_id'])
+        
+        if not EIDS: EIDS.append(self.show_id)
+        
+        return EIDS
+    
+    def GetID(self):
+        self.ID = re.findall(r'\d+', self.url)[0]
+    
+    def GetURLS(self):
+    
+        '''
+        # WEB API
+        
+        if self.url.startswith('http'):
+            pass
+        else:
+            self.url = "https://www.sunnxt.com/movie/detail/"+self.ID
+            
+        page = requests.get(self.url, headers={"user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/84.0.4147.125 Safari/537.36"}).text
+        INFO = re.findall(r'"videoInfo":(.*?)\, "twitterInfo', page)[0]
+        
+        title = re.findall(r'"title": "(.*?)"', INFO)[0]
+        try:
+            year = re.findall(r'"releaseDate": "(.*?)"', INFO)[0][0:4]
+        except:
+            year = None
+        duration = re.findall(r'"duration": "(.*?)"', INFO)[0]
+        DRM = re.findall(r'"drmEnabled": (\w+)', INFO)[0].capitalize()
+        audios = [re.findall(r'"language": (.*?)\,', INFO)[0][2:-2].capitalize()]
+        videoQuality = re.findall(r'"videoQuality": "(.*?)"', INFO)[0]
+        DOLBY = re.findall(r'"isDolby": (\w+)', INFO)[0].capitalize()
+        contentType = re.findall(r'"type": "(.*?)"', INFO)[-1]
+
+        data = {
+            "params": 
+                {
+                    "id": self.ID,
+                    "counter": 6
+                }
+        }
+        resp = requests.post(url=PLAYBACK_URL, headers=playback_headers, json=data, cookies=cookies)
+        jdent(resp.json())
+        
+        try:
+            resp = resp.json()
+            if resp.get("status") == "ERR_GUEST_USER":
+                os.remove(sunnxt_token)
+                print(json.dumps(resp, indent=4))
+                print('\nPlease Use Valid Subscribed Account.')
+                exit()
+        except Exception:
+            os.remove(sunnxt_token)
+            print('\nOld Cookies File Deleted.\nPls Re-run The script...')
+            exit()
+        
+        LINKS = []
+        for x in resp["values"]:
+            if 'elapsedTime' in x.keys() and "drmToken" not in x.keys() and x["profile"] == "High" and x["resolution"] == "1280x720" and x["format"] == "dash":
+                LINKS.append(x["link"])
+            if 'elapsedTime' not in x.keys() and "drmToken" not in x.keys() and x["profile"] == "High" and x["resolution"] == "1280x720" and x["type"] == "download" and x["format"] == "dash":
+                LINKS.append(x["link"])
+        if LINKS == []:
+            for x in resp["values"]:
+                if 'elapsedTime' in x.keys() and "drmToken" not in x.keys() and x["profile"] == "Low" and x["resolution"] == "320x240" and x["format"] == "dash":
+                    LINKS.append(x["link"])
+                if 'elapsedTime' not in x.keys() and "drmToken" not in x.keys() and x["profile"] == "Low" and x["resolution"] == "320x240" and x["type"] == "download" and x["format"] == "dash":
+                    LINKS.append(x["link"])
+        
+        MPD = LINKS[0]
+        CBR_MPD = LINKS[-1]
+        licurl = f"https://www.sunnxt.com/content/license/?content_id={self.ID}"
+        
+        resp = requests.get('https://www.sunnxt.com/content/detail', headers=playback_headers, params={'content-id': self.ID}, cookies=cookies)
+        aes = AES.new("A3s68aORSgHs$71P".encode(), AES.MODE_CBC, "0000000000000000".encode())
+        b64 = base64.b64decode(resp.content)
+        d = aes.decrypt(b64).decode()
+        
+        #print(d)
+        exit()
+        
+        subs = re.findall(r'"link_sub":"(.*?)"', d)
+        if subs: subs = subs[0].replace('\\', '') + '.vtt'
+        '''
+        
+        # ANDROID API
+        
+        fields = [
+            "videos",
+            "generalInfo",
+            "contents",
+            "subtitles"
+
+            # "videoInfo",
+            # "publishingHouse",
+            # "elapsedTime",
+            # "images",
+            # "_id",
+            # "relatedMedia",
+            # "relatedCast",
+            # "dynamicMeta",
+            # "_lastModifiedAt",
+            # "_expiresAt",
+            # "matchInfo",
+            # "globalServiceId",
+            # "publishingHouse",
+        ]
+        
+        api_params = {
+            'fields': ','.join(fields),
+            'network': 'wifi'
+        }
+        
+        resp = requests.get(f'https://api.sunnxt.com/content/v3/contentDetail/{self.ID}', headers=api_headers, params=api_params).json()
+        
+        # jdent(resp)
+        #print(resp)
+        if self.dl_type == 'LiveTV': jdent(resp['results'][0]['videos'])
+        if not resp['results']: jdent(resp)
+        if resp["status"] != 'SUCCESS': jdent(resp)
+        if resp["results"][0]['videos']['status'] != 'SUCCESS': jdent(resp["results"][0]['videos'])
+
+        title = resp['results'][0]['generalInfo']['title']
+        year = resp['results'][0]['content']['releaseDate'].split('-')[0]
+        videoQuality = resp['results'][0]['content']['videoQuality']
+        if videoQuality == '': videoQuality = 'SD'
+        videoType = resp['results'][0]['generalInfo']['type']
+        audios = resp['results'][0]['content']['language']
+        duration = resp['results'][0]['content']['duration']
+        atmos = resp['results'][0]['generalInfo']['isAtmos']
+        DOLBY = resp['results'][0]['generalInfo']['isDolby']
+        if DOLBY: DOLBY = 'DD+ 5.1'
+        if not DOLBY and atmos: DOLBY = 'DD+ 5.1 ATMOS'
+        
+        if year is None: output = title
+        elif self.dl_type != 'show': output = f'{title} ({year})'
+        else: output = title
+        
+        output = ReplaceDontLikeWord(output, mode)
+        
+        # print(videoQuality)
+        # print(videoType)
+        # print(atmos)
+        
+        if videoQuality == '4K': profile = 'high'
+        if videoQuality == 'HD': profile = 'high' 
+        if videoQuality == 'SD': profile = 'low' 
+        
+        MPDs = {}
+        for x in resp['results'][0]['videos']['values']:
+            if '4k_atmos' in x['profile'].lower() and x['format'] == 'dash' and x['type'] == 'streaming' and args.VideoCodec == 'h265': 
+                MPDs['HEVC'] = x['link']
+            if '4khdr_atmos' in x['profile'].lower() and x['format'] == 'dash' and x['type'] == 'streaming' and args.VideoCodec == 'h265_hdr': 
+                MPDs['HEVC'] = x['link']
+            if '4kdv_atmos' in x['profile'].lower() and x['format'] == 'dash' and x['type'] == 'streaming' and args.VideoCodec == 'dvh265': 
+                MPDs['HEVC'] = x['link']
+            if '4k_dolby' in x['profile'].lower() and x['format'] == 'dash' and x['type'] == 'streaming' and args.VideoCodec == 'h265': 
+                MPDs['HEVC'] = x['link']
+            if x['profile'].lower() == 'dolby' and x['format'] == 'dash' and x['type'] == 'streaming': 
+                MPDs['CVBR'] = x['link']            
+            if x['profile'].lower() == profile and x['format'] == 'dash' and x['type'] == 'download': 
+                MPDs['CBR'] = x['link']
+            if x['profile'].lower() == 'atmos' and x['format'] == 'dash' and x['type'] == 'streaming': 
+                MPDs['CBR'] = x['link']                   
+        if args.VideoCodec == 'h265_hdr':
+            args.DynamicRange = 'hdr10'
+        if args.VideoCodec == 'dvh265':
+            args.DynamicRange = 'dv'
+        licurl = f'https://api.sunnxt.com/licenseproxy/v3/modularLicense/?content_id={self.ID}&licenseType=streaming&timestamp={int(time.time())}&clientKey={api_headers["clientKey"]}'
+        
+        print('\nTitle:', output)
+        print('\nDuration:', duration)
+        print('\nMAX VIDEO:', videoQuality)
+        print('\nMAX AUDIO:', DOLBY)
+        # print(f'\nSubs: {subs}')
+        # print('\nDRM:', DRM)
+        
+        if (args.VideoCodec == 'h265' or args.VideoCodec == 'h265_hdr' or args.VideoCodec == 'dvh265') and 'HEVC' not in MPDs:
+            print(clr.RED + '\nERROR:' + clr.YELLOW + ' 4K NOT AVAILABLE!...')
+            exit()
+        
+        DL = MPDManager(MPDs, licurl, audios, output, resp)
+        DL.Download()
+    
+    def start_download(self):
+        self.GetID()
+        self.GetURLS()
+
+#========================#
+
+#======== PARSER ========#
+
+def do_decrypt(pssh, licurl, args):
+    license_headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/77.0.3865.75 Safari/537.36',
+        "X-Forwarded-For": "157.32.0.0"
+    }
+    wvdecrypt = WvDecrypt(pssh, False, False, args)
+    chal = wvdecrypt.get_challenge()
+    resp = requests.post(url=licurl, data=chal, headers=license_headers)
+    license_decoded = resp.content
+    license_b64 = base64.b64encode(license_decoded)
+    wvdecrypt.update_license(license_b64)
+    raw_keys = wvdecrypt.start_process()
+    return raw_keys
+
+headers = {
+    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.131 Safari/537.36'
+}
+
+class MPDManager:
+    
+    def __init__(self, MPDs, licurl, audios, output, subs_resp):
+        self.MPDs = MPDs
+        self.licurl = licurl
+        self.output = output
+        self.audios_lang = audios
+        self.subs_resp = subs_resp
+    
+    def ParseMPD(self):
+        global pssh
+        print(self.MPDs)
+        print(f'\n{self.output} MPD URL: {self.MPDs["CVBR"]}')
+        if (args.VideoCodec == 'h265' or args.VideoCodec == 'h265_hdr' or args.VideoCodec == 'dvh265'): print(f'\n{self.output} 4K MPD URL: {self.MPDs["HEVC"]}')
+        print(f'\n{self.output} LICENSE URL: {self.licurl}')
+        
+        v_list = {}
+        VMPD_ = ['HEVC' if (args.VideoCodec == 'h265' or args.VideoCodec == 'h265_hdr' or args.VideoCodec == 'dvh265') else 'CVBR']
+        for BT in VMPD_:
+            MPD = self.MPDs[BT]
+            cookies = {}
+            hmac_token = MPD.split('?')[-1] if '?' in MPD else ''
+            hmac_token = ReplaceURLWord(hmac_token)
+            BaseURL = MPD.split('?')[0].rsplit('/', 1)[0]
+            mpd = requests.get(MPD, headers=headers).text
+            mpd = json.loads(json.dumps(xmltodict.parse(mpd)))
+            wv_id = 'urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed'
+            
+            duration = isodate.parse_duration(mpd['MPD']['@mediaPresentationDuration']).total_seconds() 
+            bufftime = isodate.parse_duration(mpd["MPD"]["@minBufferTime"]).total_seconds() 
+            last_seg = str(round(duration / bufftime))
+            
+            for adaptation in mpd['MPD']['Period']['AdaptationSet']:
+                if adaptation['@mimeType'] == 'video/mp4':
+                    
+                    if 'ContentProtection' in adaptation:
+                        cp = adaptation['ContentProtection']
+                        if type(cp) is list:
+                            for p in cp:
+                                # print(p)
+                                if wv_id in p.get('@schemeIdUri').lower():
+                                    pssh = p.get('cenc:pssh')
+                    
+                    if type(adaptation.get('Representation', '')) is list:
+                        for rep in adaptation.get('Representation'):
+                            width = int(rep.get('@width') if '@height' in rep.keys() else adaptation.get('@width'))
+                            height = int(rep.get('@height') if '@height' in rep.keys() else adaptation.get('@height'))
+                            height_ = FixHeight(width, height)
+                            
+                            vid_id = str(height_)
+                            if vid_id in v_list: vid_id = EditHeight(vid_id, v_list)
+                            
+                            DynamicRange = 'HDR10' if 'hvc1.2.4' in rep['@codecs'] else 'SDR'
+                            DynamicRange = 'DoVi' if 'dvh1' in rep['@codecs'] else 'SDR'
+                            v_codec = 'AVC' if 'avc' in rep['@codecs'] else 'HEVC'
+                            fps = round(eval(rep['@frameRate']), 3)
+                            
+                            if adaptation.get('SegmentTemplate') and not rep.get('SegmentTemplate'):
+                                init = adaptation['SegmentTemplate']['@initialization']
+                                media = adaptation['SegmentTemplate']['@media']
+                                init_pat = '$' + ReplaceURLWord(re.findall('\$(.*?)\$', init)[-1]) + '$'
+                                media_pat = '$' + re.findall('\$(.*?)\$', media)[-1] + '$'
+                                init_url = BaseURL + '/' + init.replace(init_pat, rep['@id'])
+                                
+                                if init.startswith('http'):
+                                    init_url = init.replace(init_pat, rep['@id'])
+                                
+                                init_url = ReplaceURLWord(init_url)
+                                
+                                start_num = adaptation['SegmentTemplate'].get('@startNumber')
+                                
+                                v_url = BaseURL + '/' + media.replace(init_pat, rep['@id']).replace(media_pat, f'[1-{last_seg}]')
+                                
+                                if media.startswith('http'):
+                                    v_url = media.replace(init_pat, rep['@id']).replace('$Number$', f'[1-{last_seg}]')
+                                
+                                seg1_url = v_url.replace(f'[1-{last_seg}]', '1')
+                                
+                                if '%09' in media_pat:
+                                    v_url = BaseURL + '/' + media.replace(init_pat, rep['@id']).replace(media_pat, f'[000000001-{str(last_seg).zfill(9)}]')
+                                    seg1_url = v_url.replace(f'[000000001-{str(last_seg).zfill(9)}]', '000000001')
+
+                                try:
+                                    TimeSeg = adaptation['SegmentTemplate']['SegmentTimeline']['S']
+                                except Exception:
+                                    TimeSeg = None
+                                
+                                if TimeSeg or 'Time' in media_pat:
+                                    v_url = GetTimeSegs(init_url, TimeSeg, rep['@height'])
+                                
+                                if 'hdntl' not in v_url and hmac_token:
+                                    v_url += f'?{hmac_token}'
+                                if 'hdntl' not in init_url and hmac_token:
+                                    init_url += f'?{hmac_token}'
+                                if 'hdntl' not in seg1_url and hmac_token:
+                                    seg1_url += f'?{hmac_token}'
+                                    
+                                size = 1 # requests.head(seg1_url, headers=headers, cookies=cookies).headers.get('Content-Length', 0)
+                                size = int(size) * int(last_seg)
+                                container = 'fmp4'
+                            elif rep.get('SegmentTemplate'):  
+                                init = rep['SegmentTemplate']['@initialization']
+                                media = rep['SegmentTemplate']['@media']
+                                try:
+                                    init_pat = '$' + ReplaceURLWord(re.findall('\$(.*?)\$', init)[-1]) + '$'
+                                    init_url = BaseURL + '/' + init.replace(init_pat, rep['@id'])
+                                except Exception:
+                                    init_pat = ReplaceURLWord(init)
+                                    init_url = BaseURL + '/' + init
+                                
+                                if init.startswith('http'):
+                                    init_url = init.replace(init_pat, rep['@id'])
+                                
+                                init_url = ReplaceURLWord(init_url)
+                                media_pat = '$' + re.findall('\$(.*?)\$', media)[-1] + '$'
+                                
+                                start_num = rep['SegmentTemplate'].get('@startNumber')
+                                
+                                v_url = BaseURL + '/' + media.replace(init_pat, rep['@id']).replace(media_pat, f'[1-{last_seg}]')
+                                seg1_url = v_url.replace(f'[1-{last_seg}]', '1')
+                                
+                                if media.startswith('http'):
+                                    v_url = media.replace(init_pat, rep['@id']).replace('$Number$', f'[1-{last_seg}]')
+                                
+                                if '%09' in media_pat:
+                                    v_url = BaseURL + '/' + media.replace(init_pat, rep['@id']).replace(media_pat, f'[000000001-{str(last_seg).zfill(9)}]')
+                                    seg1_url = v_url.replace(f'[000000001-{str(last_seg).zfill(9)}]', '000000001')
+                                
+                                if 'hdntl' not in v_url and hmac_token:
+                                    v_url += f'?{hmac_token}'
+                                if 'hdntl' not in init_url and hmac_token:
+                                    init_url += f'?{hmac_token}'
+                                if 'hdntl' not in seg1_url and hmac_token:
+                                    seg1_url += f'?{hmac_token}'
+                                size = 1 # requests.head(seg1_url, headers=headers, cookies=cookies).headers.get('Content-Length', 0)
+                                size = int(size) * int(last_seg)
+                                container = 'fmp4'
+                            
+                            v_list[vid_id] = {
+                                'vid_id': vid_id,
+                                'width': width,
+                                'height': height,
+                                'dynamic-range': DynamicRange,
+                                'codec': v_codec,
+                                'bandwidth': convert_size(rep['@bandwidth']),
+                                'framerate': fps,
+                                'init_url': init_url,
+                                'url': v_url,
+                                'size': GetSize(size),
+                                'container': 'fmp4',
+                                'link_type': 'link',
+                                'pssh': pssh,
+                                'drm': True if pssh else False,
+                                'AIV': False
+                            }
+                                    
+                            pretty_video.add_row([
+                                vid_id,
+                                f'{width}x{height}',
+                                DynamicRange,
+                                v_codec,
+                                convert_size(int(rep['@bandwidth'])),
+                                fps,
+                                True if pssh else False,
+                                GetSize(size)
+                            ])
+            
+        # print(f'\n{pretty_video}')            
+        
+        a_list = {}
+        AMPD_ = ['HEVC'] if self.MPDs.get('HEVC') else []
+        AMPD_ += ['CVBR', 'CBR']
+        
+        for BT in AMPD_:
+            MPD = self.MPDs[BT]
+            cookies = {}
+            hmac_token = MPD.split('?')[-1] if '?' in MPD else ''
+            hmac_token = ReplaceURLWord(hmac_token)
+            BaseURL = MPD.split('?')[0].rsplit('/', 1)[0]
+            mpd = requests.get(MPD, headers=headers).text
+            mpd = json.loads(json.dumps(xmltodict.parse(mpd)))
+            wv_id = 'urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed'
+            
+            duration = isodate.parse_duration(mpd['MPD']['@mediaPresentationDuration']).total_seconds() 
+            bufftime = isodate.parse_duration(mpd["MPD"]["@minBufferTime"]).total_seconds() 
+            last_seg = str(round(duration / bufftime))
+            
+            for adaptation in mpd['MPD']['Period']['AdaptationSet']:
+                if 'audio' in adaptation.get('@mimeType', '') or 'audio' in adaptation.get('@contentType', '') or 'AudioChannelConfiguration' in adaptation:
+                    if 'ContentProtection' in adaptation:
+                        cp = adaptation['ContentProtection']
+                        if type(cp) is list:
+                            for p in cp:
+                                if wv_id in p.get('@schemeIdUri').lower(): pssh = p.get('cenc:pssh')
+                    
+                    lang = self.audios_lang[0].capitalize()
+                    if type(adaptation.get('Representation', '')) is list:
+                        for rep in adaptation.get('Representation', []):
+                            if not pssh and 'ContentProtection' in rep:
+                                cp = rep['ContentProtection']
+                                if type(cp) is list:
+                                    for p in cp:
+                                        if p.get('@schemeIdUri', '') == wv_id:
+                                            pssh = p.get('cenc:pssh')
+                            a_type = 'Dialog'
+                            if type(pssh) is dict: pssh = pssh.get('#text', pssh)
+                            
+                            try: a_codec = FixAudioCodec(rep['@codecs'])
+                            except: a_codec = FixAudioCodec(adaptation['@codecs'])
+
+                            if 'AudioChannelConfiguration' in rep:
+                                a_ch = '5.1' if int(rep['AudioChannelConfiguration']['@value'].replace('F', '').replace('A', '')) >= 6 else '2.0'
+                            
+                            if 'AudioChannelConfiguration' in adaptation:
+                                a_ch = '5.1' if int(adaptation['AudioChannelConfiguration']['@value'].replace('F', '').replace('A', '')) >= 6 else '2.0'
+                            
+                            a_bit = FixAudioBitRate(convert_size(rep.get('@bandwidth', 0)))
+                            a_srate = '48.0 kHz'
+                            if rep.get('@audioSamplingRate'): a_srate = str(round(int(rep.get('@audioSamplingRate')) / 1000, 2)) + ' kHz'
+                            
+                            if a_bit == 448: a_codec = 'ATMOS'
+                            
+                            a_id = f'{lang}_{a_codec.lower()}_{a_ch.split(".")[0]}ch_{a_bit}k'
+                            
+                            if 'BaseURL' in rep.keys():
+                                a_url = BaseURL + '/' + ReplaceURLWord(rep['BaseURL'])                         
+                                if rep['BaseURL'].startswith('../'): 
+                                    a_url = BaseURL1 + '/' + ReplaceURLWord(rep['BaseURL'])      
+                                if 'hdntl' not in a_url and hmac_token:
+                                    a_url += f'?{hmac_token}'
+                                
+                                if rep['BaseURL'].startswith('https://'):   
+                                    a_url = ReplaceURLWord(rep['BaseURL'])
+                                
+                                size = 0, # requests.head(a_url, headers=headers, cookies=cookies).headers.get('Content-Length', 0)
+                                container = 'fmp4br'
+                                init_url = None
+                            
+                            if adaptation.get('SegmentTemplate')and not rep.get('SegmentTemplate'):
+                                init = adaptation['SegmentTemplate']['@initialization']
+                                media = adaptation['SegmentTemplate']['@media']
+                                init_pat = '$' + ReplaceURLWord(re.findall('\$(.*?)\$', init)[-1]) + '$'
+                                media_pat = '$' + re.findall('\$(.*?)\$', media)[-1] + '$'
+                                init_url = BaseURL + '/' + init.replace(init_pat, rep['@id']) 
+                                
+                                if init.startswith('http'):
+                                    init_url = init.replace(init_pat, rep['@id'])
+                                
+                                init_url = ReplaceURLWord(init_url)
+                                
+                                start_num = adaptation['SegmentTemplate'].get('@startNumber')
+                                
+                                
+                                a_url = BaseURL + '/' + media.replace(init_pat, rep['@id']).replace(media_pat, f'[1-{last_seg}]')
+                                
+                                if media.startswith('http'):
+                                    a_url = media.replace(init_pat, rep['@id']).replace('$Number$', f'[1-{last_seg}]')
+            
+                                seg1_url = a_url.replace(f'[1-{last_seg}]', '1')
+
+                                if '%09' in media_pat:
+                                    a_url = BaseURL + '/' + media.replace(init_pat, rep['@id']).replace(media_pat, f'[000000001-{str(last_seg).zfill(9)}]')
+                                    seg1_url = a_url.replace(f'[000000001-{str(last_seg).zfill(9)}]', '000000001')
+
+                                try:
+                                    TimeSeg = adaptation['SegmentTemplate']['SegmentTimeline']['S']
+                                except Exception:
+                                    TimeSeg = None
+                                
+                                if TimeSeg or 'Time' in media_pat:
+                                    a_url = GetTimeSegs(init_url, TimeSeg, lang)
+                                
+                                if 'hdntl' not in a_url and hmac_token:
+                                    a_url += f'?{hmac_token}'
+                                if 'hdntl' not in init_url and hmac_token:
+                                    init_url += f'?{hmac_token}'
+                                if 'hdntl' not in seg1_url and hmac_token:
+                                    seg1_url += f'?{hmac_token}'
+                                size = 0 # requests.head(seg1_url, headers=headers, cookies=cookies).headers.get('Content-Length', 0)
+                                size = int(size) * int(last_seg)
+                                container = 'fmp4'
+                            elif rep.get('SegmentTemplate'):
+                                init = rep['SegmentTemplate']['@initialization']
+                                media = rep['SegmentTemplate']['@media']
+                                try:
+                                    init_pat = '$' + ReplaceURLWord(re.findall('\$(.*?)\$', init)[-1]) + '$'
+                                    init_url = BaseURL + '/' + init.replace(init_pat, rep['@id'])
+                                except Exception:
+                                    init_pat = ReplaceURLWord(init)
+                                    init_url = BaseURL + '/' + init
+                                
+                                if init.startswith('http'):
+                                    init_url = init.replace(init_pat, rep['@id'])
+                                
+                                init_url = ReplaceURLWord(init_url)
+                                start_num = rep['SegmentTemplate'].get('@startNumber')
+                                media_pat = '$' + re.findall('\$(.*?)\$', media)[-1] + '$'
+                                a_url = BaseURL + '/' + media.replace(init_pat, rep['@id']).replace(media_pat, f'[1-{last_seg}]')
+                                
+                                if media.startswith('http'):
+                                    a_url = media.replace(init_pat, rep['@id']).replace('$Number$', f'[1-{last_seg}]')
+                                
+                                seg1_url = a_url.replace(f'[1-{last_seg}]', '1')
+                                
+                                if '%09' in media_pat:
+                                    a_url = BaseURL + '/' + media.replace(init_pat, rep['@id']).replace(media_pat, f'[000000001-{str(last_seg).zfill(9)}]')
+                                    seg1_url = a_url.replace(f'[000000001-{str(last_seg).zfill(9)}]', '000000001')
+
+                                
+                                if 'hdntl' not in a_url and hmac_token:
+                                    a_url += f'?{hmac_token}'
+                                if 'hdntl' not in init_url and hmac_token:
+                                    init_url += f'?{hmac_token}'
+                                if 'hdntl' not in seg1_url and hmac_token:
+                                    seg1_url += f'?{hmac_token}'
+                                size = 0 # requests.head(seg1_url, headers=headers, cookies=cookies).headers.get('Content-Length', 0)
+                                size = int(size) * int(last_seg)
+                                container = 'fmp4'
+                            
+                            # print(init_url)
+                            # print(media)
+                            # print(seg1_url)
+                            # print(a_url)
+                            # print(lang)
+                            
+                            # print(a_id)
+                            
+                            a_url = ReplaceURLWord(a_url)
+                            a_list[a_id]  = {
+                                'aud_id': Get2DigitCodeLang(lang),
+                                'language': lang,
+                                'a_codec': a_codec,
+                                'a_ch': a_ch,
+                                'a_bit': a_bit,
+                                'a_srate': a_srate,
+                                'a_type': a_type,
+                                'init_url': init_url,
+                                'url': a_url,
+                                'size': GetSize(size),
+                                'container': container,
+                                'link_type': 'link',
+                                'pssh': pssh,
+                                'drm': True if pssh else False
+                            }
+                            
+                            pretty_audio.add_row([
+                                Get2DigitCodeLang(lang),
+                                lang,
+                                a_codec,
+                                a_ch,
+                                str(a_bit) + ' Kbps',
+                                a_srate,
+                                a_type,
+                                True if pssh else False,
+                                GetSize(size)
+                            ])
+                            
+                            # print(a_list)
+                            
+                    if type(adaptation.get('Representation', '')) is dict:
+                        rep = adaptation.get('Representation')
+                        
+                        if not pssh and 'ContentProtection' in rep:
+                            cp = rep['ContentProtection']
+                            if type(cp) is list:
+                                for p in cp:
+                                    if p.get('@schemeIdUri', '') == wv_id:
+                                        pssh = p.get('cenc:pssh')
+                        
+                        if type(pssh) is dict: pssh = pssh.get('#text', pssh)
+
+                        a_type = 'Dialog'
+                        if rep.get('@codecs'): a_codec = FixAudioCodec(rep['@codecs'])
+                            
+                        if adaptation.get('@codecs'): a_codec = FixAudioCodec(adaptation['@codecs'])
+                        
+                        a_ch = '2.0'
+                        if 'AudioChannelConfiguration' in rep:
+                            a_ch = '5.1' if int(rep['AudioChannelConfiguration']['@value'].replace('F', '').replace('A', '')) >= 6 else '2.0'
+                        
+                        if 'AudioChannelConfiguration' in adaptation:
+                            a_ch = '5.1' if int(adaptation['AudioChannelConfiguration']['@value'].replace('F', '').replace('A', '')) >= 6 else '2.0'
+                        
+                        a_bit = FixAudioBitRate(convert_size(rep.get('@bandwidth', 0)))
+                        if rep.get('@audioSamplingRate'):
+                            a_srate = str(round(int(rep.get('@audioSamplingRate')) / 1000, 2)) + ' kHz'
+                        
+                        if adaptation.get('@audioSamplingRate'):
+                            a_srate = str(round(int(adaptation.get('@audioSamplingRate')) / 1000, 2)) + ' kHz'
+                        
+                        if a_bit == 448:
+                            a_codec = 'ATMOS'
+                        
+                        a_id = f'{lang}_{a_codec.lower()}_{a_ch.split(".")[0]}ch_{a_bit}k'
+                        
+                        if 'BaseURL' in rep.keys():
+                            a_url = BaseURL + '/' + ReplaceURLWord(rep['BaseURL'])                            
+                            if rep['BaseURL'].startswith('../'): 
+                                a_url = BaseURL1 + '/' + ReplaceURLWord(rep['BaseURL'])         
+                            if 'hdntl' not in a_url and hmac_token:
+                                a_url += f'?{hmac_token}'
+                            
+                            if rep['BaseURL'].startswith('https://'):   
+                                a_url = ReplaceURLWord(rep['BaseURL'])
+                            
+                            size = 0 # requests.head(a_url, headers=headers, cookies=cookies).headers.get('Content-Length', 0)
+                            container = 'fmp4br'
+                            init_url = None
+                        
+                        if adaptation.get('SegmentTemplate') and not rep.get('SegmentTemplate'):
+                            init = adaptation['SegmentTemplate']['@initialization']
+                            media = adaptation['SegmentTemplate']['@media']
+
+                            try:
+                                init_pat = '$' + ReplaceURLWord(re.findall('\$(.*?)\$', init)[-1]) + '$'
+                            except Exception:
+                                init_pat = '|'
+                            
+                            media_pat = '$' + re.findall('\$(.*?)\$', media)[-1] + '$'
+                            init_url = BaseURL + '/' + init.replace(init_pat, rep['@id'])
+                            
+                            if init.startswith('http'):
+                                init_url = init.replace(init_pat, rep['@id'])
+                            
+                            init_url = ReplaceURLWord(init_url)
+                            start_num = adaptation['SegmentTemplate'].get('@startNumber')
+                            
+                            a_url = BaseURL + '/' + media.replace(init_pat, rep['@id']).replace(media_pat, f'[1-{last_seg}]')
+                            
+                            if media.startswith('http'):
+                                a_url = media.replace(init_pat, rep['@id']).replace('$Number$', f'[1-{last_seg}]')
+                            
+                            seg1_url = a_url.replace(f'[1-{last_seg}]', '1')
+                            
+                            if '%09' in media_pat:
+                                a_url = BaseURL + '/' + media.replace(init_pat, rep['@id']).replace(media_pat, f'[000000001-{str(last_seg).zfill(9)}]')
+                                seg1_url = a_url.replace(f'[000000001-{str(last_seg).zfill(9)}]', '000000001')
+
+                            try:
+                                TimeSeg = adaptation['SegmentTemplate']['SegmentTimeline']['S']
+                            except Exception:
+                                TimeSeg = None
+                            
+                            if TimeSeg or 'Time' in media_pat:
+                                a_url = GetTimeSegs(init_url, TimeSeg, lang)
+                            
+                            if 'hdntl' not in a_url and hmac_token:
+                                a_url += f'?{hmac_token}'
+                            if 'hdntl' not in init_url and hmac_token:
+                                init_url += f'?{hmac_token}'
+                            if 'hdntl' not in seg1_url and hmac_token:
+                                seg1_url += f'?{hmac_token}'
+                            size = 0 # requests.head(seg1_url, headers=headers, cookies=cookies).headers.get('Content-Length', 0)
+                            size = int(size) * int(last_seg)
+                            container = 'fmp4'
+                        elif rep.get('SegmentTemplate'):
+                            init = rep['SegmentTemplate']['@initialization']
+                            media = rep['SegmentTemplate']['@media']
+                            try:
+                                init_pat = '$' + ReplaceURLWord(re.findall('\$(.*?)\$', init)[-1]) + '$'
+                                init_url = BaseURL + '/' + init.replace(init_pat, rep['@id'])
+                            except Exception:
+                                init_pat = ReplaceURLWord(init)
+                                init_url = BaseURL + '/' + init
+                            
+                            if init.startswith('http'):
+                                init_url = init.replace(init_pat, rep['@id'])
+                            
+                            init_url = ReplaceURLWord(init_url)
+                            start_num = rep['SegmentTemplate'].get('@startNumber')
+                            media_pat = '$' + re.findall('\$(.*?)\$', media)[-1] + '$'
+                            a_url = BaseURL + '/' + media.replace(init_pat, rep['@id']).replace(media_pat, f'[1-{last_seg}]')
+                            
+                            if media.startswith('http'):
+                                a_url = media.replace(init_pat, rep['@id']).replace('$Number$', f'[1-{last_seg}]')
+                            
+                            seg1_url = a_url.replace(f'[1-{last_seg}]', '1')
+                            
+                            if '%09' in media_pat:
+                                a_url = BaseURL + '/' + media.replace(init_pat, rep['@id']).replace(media_pat, f'[000000001-{str(last_seg).zfill(9)}]')
+                                seg1_url = a_url.replace(f'[000000001-{str(last_seg).zfill(9)}]', '000000001')
+
+                            
+                            if 'hdntl' not in a_url and hmac_token:
+                                a_url += f'?{hmac_token}'
+                            if 'hdntl' not in init_url and hmac_token:
+                                init_url += f'?{hmac_token}'
+                            if 'hdntl' not in seg1_url and hmac_token:
+                                seg1_url += f'?{hmac_token}'
+                            size = 0 # requests.head(seg1_url, headers=headers, cookies=cookies).headers.get('Content-Length', 0)
+                            size = int(size) * int(last_seg)
+                            container = 'fmp4'
+
+                        a_url = ReplaceURLWord(a_url)
+
+                        a_list[a_id]  = {
+                            'aud_id': Get2DigitCodeLang(lang),
+                            'language': lang,
+                            'a_codec': a_codec,
+                            'a_ch': a_ch,
+                            'a_bit': a_bit,
+                            'a_srate': a_srate,
+                            'a_type': a_type,
+                            'init_url': init_url,
+                            'url': a_url,
+                            'size': GetSize(size),
+                            'container': container,
+                            'link_type': 'link',
+                            'pssh': pssh,
+                            'drm': True if pssh else False
+                        }
+                        
+                        pretty_audio.add_row([
+                            Get2DigitCodeLang(lang),
+                            lang,
+                            a_codec,
+                            a_ch,
+                            str(a_bit) + ' Kbps',
+                            a_srate,
+                            a_type,
+                            True if pssh else False,
+                            GetSize(size)
+                        ])
+           
+        s_list = {}
+        for x in self.subs_resp['results'][0]['subtitles']['values']:
+            codec = 'vtt'
+            lang = x['language']
+            s_list[lang] = {
+                'sub_id': Get2DigitCodeLang(lang),
+                'language': lang,
+                'codec': codec,
+                'forced': False,
+                'url': x['link_sub'] + '.vtt'
+            }
+           
+            pretty_subs.add_row([
+                'en',
+                'English',
+                False,
+                codec
+            ])
+
+        # jdent(s_list)
+        # jdent(a_list)
+        # jdent(s_list)
+        
+        MM = mpdManager(self, self.output, v_list, a_list, s_list, headers, pssh, mode, args)
+        MM.Download()
+
+    def GetKeys(self):
+        keys = []
+        
+        keys_title = f'\n{self.output} KEYS:\n'
+        keys_json_file = keys_txt.format(mode).replace('.txt', '.json')   
+        if not os.path.exists(keys_json_file):
+            with open(keys_json_file, 'w') as fw:
+                fw.write('[]')
+                fw.close()
+        else:
+            check_json = json.loads(open(keys_json_file).read())
+            for x in check_json:
+                if x['title'] == self.output:
+                    print(clr.YELLOW + '\nKEYS FOUND IN TEXT FILE!...')
+                    print(keys_title)
+                    print(clr.GREEN + str(x['keys']).replace('[', '').replace(']', '').replace("'", "").replace(', ', '\n'))
+                    return x['keys']
+
+        print(keys_title)
+        if args.ManualKeys:
+            keys = args.ManualKeys
+            for key in keys:
+                print(clr.GREEN + key)
+        else:
+            raw_keys = do_decrypt(pssh, self.licurl, args)
+            for key in raw_keys:
+                if key.type == 'CONTENT':
+                    key = '{}:{}'.format(key.kid.hex(), key.key.hex())
+                    print(clr.GREEN + key)
+                    keys.append(key)
+        
+        with open(keys_txt.format(mode), "a") as t:
+            keys_ = str(keys).replace('[', '').replace(']', '').replace("'", "").replace(', ', '\n')
+            t.write(f'\n{keys_title}\nMPD: {self.MPDs["CVBR"].split("?")[0]}\n\n===========KEYS=========\n\n{keys_}')
+            t.close()
+        
+        json_text = {
+            "title": self.output,
+            "mpd": self.MPDs["CVBR"].split('?')[0],
+            "keys": keys
+        }
+        
+        with open(keys_json_file, 'r') as rm:
+            l = json.loads(rm.read())
+            l.append(json_text)
+
+        with open(keys_json_file, 'w') as fw:
+            json.dump(l, fw, indent=4)
+        
+        return keys
+        
+    def Download(self):
+        pretty_video.clear_rows()
+        pretty_audio.clear_rows()
+        pretty_subs.clear_rows()
+        self.ParseMPD()
+
+#========================#
+
+#======== MAIN ==========#
+
+class Download():
+    
+    def __init__(self):
+        urls = []
+
+    def read_urls(self, filepath):
+        urls = []
+        with open(filepath, "r") as fh:
+            for line in fh:
+                url = line.strip()
+                if url:
+                    urls.append(url)
+        return urls
+
+    def run(self):
+        args = argManager()
+        if args.url is None and args.file is None:
+            dl_urls = input("\nEnter the URL: ").split(',')
+        elif args.url is None and args.file:
+            dl_urls = self.read_urls(args.file)
+        else:
+            dl_urls = args.url.split(',')
+
+        for dl_url in dl_urls:
+            dl_type = scan_url(dl_url)
+            if dl_type == 'show':
+                SUN = SunnxtClient(dl_url,dl_type)
+                Episodes = SUN.GetEpsiodeIDS()
+                print("\nTotal Episodes:",len(Episodes))
+                if len(Episodes) == 1:
+                    pass
+                elif args.EpisodeStart:
+                    No = int(args.EpisodeStart) - 1
+                    if args.EpisodeEnd:
+                        Episodes = Episodes[No:int(args.EpisodeEnd)]
+                    else:
+                        Episodes = Episodes[No:]
+                else:
+                    ES = int(input("\nENTER EPISODE START: ")) - 1
+                    Episodes = Episodes[ES:]
+                for EP in Episodes:
+                    SUN = SunnxtClient(EP,dl_type)
+                    SUN.start_download()
+                    
+            else:
+                SUN = SunnxtClient(dl_url,dl_type)
+                SUN.start_download()
+
+if __name__ == '__main__':
+    obj = Download()
+    obj.run()
+
+#========================#
